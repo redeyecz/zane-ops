@@ -4,6 +4,8 @@ import {
   CableIcon,
   ContainerIcon,
   ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
   FileSlidersIcon,
   GlobeIcon,
   GlobeLockIcon,
@@ -11,6 +13,7 @@ import {
   HeartPulseIcon,
   HistoryIcon,
   InfoIcon,
+  KeyRoundIcon,
   MetronomeIcon,
   NetworkIcon,
   RotateCwIcon,
@@ -46,7 +49,7 @@ import {
 import { ZANEOPS_INTERNAL_DOMAIN } from "~/lib/constants";
 import { composeStackQueries } from "~/lib/queries";
 import { cn } from "~/lib/utils";
-import { formatElapsedTime } from "~/utils";
+import { formatElapsedTime, pluralize } from "~/utils";
 import type { Route } from "./+types/compose-stack-service-details";
 
 export default function ComposeStackServiceDetailsPage({
@@ -223,6 +226,63 @@ export default function ComposeStackServiceDetailsPage({
                   </div>
                 </FieldSet>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="environment" className="flex gap-1 scroll-mt-24 max-w-4xl">
+          <div className="w-16 hidden md:flex flex-col items-center">
+            <div className="flex rounded-full size-10 flex-none items-center justify-center p-1 border-2 border-grey/50">
+              <KeyRoundIcon size={15} className="flex-none text-grey" />
+            </div>
+            <div className="h-full border border-grey/50"></div>
+          </div>
+
+          <div className="w-full flex flex-col gap-5 pt-1 pb-8">
+            <h2 className="text-lg text-grey">Environment variables</h2>
+            <div className="w-full max-w-4xl">
+              {service.environment.length === 0 ? (
+                <div
+                  className={cn(
+                    "flex flex-col gap-2 items-center py-8 bg-muted/20",
+                    "border-border border-dashed rounded-md border-1"
+                  )}
+                >
+                  No variables in this service
+                </div>
+              ) : (
+                <div className="flex flex-col gap-4">
+                  <hr className="border-border" />
+                  <h3 className="text-lg inline-flex gap-2 items-center">
+                    <span>
+                      {service.environment.length}&nbsp;
+                      {pluralize("variable", service.environment.length)}
+                    </span>
+                    <CopyButton
+                      variant="outline"
+                      size="sm"
+                      showLabel
+                      label={(hasCopied) =>
+                        hasCopied ? "Copied" : "Copy as .env"
+                      }
+                      value={service.environment
+                        .map((env) => `${env.key}="${env.value}"`)
+                        .join("\n")}
+                    />
+                  </h3>
+
+                  <hr className="border-border" />
+
+                  {service.environment.map((env) => (
+                    <EnVariableRow
+                      key={`env-${env.key}`}
+                      name={env.key}
+                      value={env.value}
+                    />
+                  ))}
+                  <hr className="border-border" />
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -598,6 +658,16 @@ function SideNav() {
           <li>
             <Link
               to={{
+                hash: "#environment"
+              }}
+            >
+              Environment variables
+            </Link>
+          </li>
+
+          <li>
+            <Link
+              to={{
                 hash: "#networking"
               }}
             >
@@ -805,5 +875,73 @@ function ConfigItem({
         </AccordionContent>
       </AccordionItem>
     </Accordion>
+  );
+}
+
+type EnvVariableUI = {
+  name: string;
+  value: string;
+};
+
+function EnVariableRow({ name: key, value }: EnvVariableUI) {
+  const [isEnvValueShown, setIsEnvValueShown] = React.useState(false);
+
+  return (
+    <div
+      className={cn(
+        "grid gap-4 items-center md:grid-cols-7 lg:grid-cols-8 grid-cols-3 group pl-4 pt-2 md:py-1"
+      )}
+    >
+      <>
+        <div
+          className={cn("col-span-3 md:col-span-2 lg:col-span-3 flex flex-col")}
+        >
+          <span className="font-mono break-all">{key}</span>
+        </div>
+        <div className="col-span-2 font-mono flex items-center gap-2 md:col-span-4">
+          {isEnvValueShown ? (
+            <p className="whitespace-nowrap overflow-x-auto">
+              {value.length > 0 ? (
+                value
+              ) : (
+                <span className=" font-mono">{`<empty>`}</span>
+              )}
+            </p>
+          ) : (
+            <span className="relative top-1">*********</span>
+          )}
+          <TooltipProvider>
+            <Tooltip delayDuration={0}>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  onClick={() => setIsEnvValueShown(!isEnvValueShown)}
+                  className="px-2.5 py-0.5 md:opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
+                >
+                  {isEnvValueShown ? (
+                    <EyeOffIcon size={15} className="flex-none" />
+                  ) : (
+                    <EyeIcon size={15} className="flex-none" />
+                  )}
+                  <span className="sr-only">
+                    {isEnvValueShown ? "Hide" : "Reveal"} variable value
+                  </span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {isEnvValueShown ? "Hide" : "Reveal"} variable value
+              </TooltipContent>
+            </Tooltip>
+
+            <Tooltip delayDuration={0}>
+              <TooltipTrigger asChild>
+                <CopyButton label="Copy variable value" value={value} />
+              </TooltipTrigger>
+              <TooltipContent>Copy variable value</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      </>
+    </div>
   );
 }
