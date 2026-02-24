@@ -43,7 +43,6 @@ from typing import Sequence, Self
 from rest_framework.utils.serializer_helpers import ReturnDict
 from ..dtos import ServiceSnapshot, DeploymentChangeDto
 from git_connectors.constants import (
-    PREVIEW_DEPLOYMENT_COMMENT_MARKDOWN_TEMPLATE,
     PREVIEW_DEPLOYMENT_BLOCKED_COMMENT_MARKDOWN_TEMPLATE,
     PREVIEW_DEPLOYMENT_DECLINED_COMMENT_MARKDOWN_TEMPLATE,
 )
@@ -57,7 +56,13 @@ if TYPE_CHECKING:
     from django.db.models.manager import RelatedManager
 
 
+def generate_project_preview_deploy_token():
+    return f"{Project.PREVIEW_DEPLOY_TOKEN_PREFIX}{secrets.token_hex(16)}"
+
+
 class Project(TimestampedModel):
+    PREVIEW_DEPLOY_TOKEN_PREFIX = "pt_"
+
     if TYPE_CHECKING:
         compose_stacks: RelatedManager["ComposeStack"]
     environments: Manager["Environment"]
@@ -76,6 +81,11 @@ class Project(TimestampedModel):
         prefix="prj_",
     )
     description = models.TextField(blank=True, null=True)
+    preview_deploy_token = models.CharField(
+        max_length=64,
+        unique=True,
+        default=generate_project_preview_deploy_token,
+    )
 
     @property
     async def abuild_registry(self):
@@ -1657,111 +1667,94 @@ class Deployment(BaseDeployment):
     def __str__(self):
         return f"DockerDeployment(hash={self.hash}, service={self.service.slug}, project={self.service.project.slug}, status={self.status})"
 
-    def get_pull_request_deployment_comment_body(self):
-        service = self.service
-        project = self.service.project
-        environment = self.service.environment
+    def _get_pull_request_status_icon(self):
+        status_emoji_map = {
+            "HEALTHY": "🟢",
+            "FAILED": "❌",
+            "QUEUED": "⏳",
+            "PREPARING": "⏳",
+            "BUILDING": "🔨",
+            "STARTING": "▶️",
+            "RESTARTING": "🔄",
+            "CANCELLING": "⏹️",
+            "CANCELLED": "🚫",
+        }
+        return status_emoji_map[self.status]
 
-        formated_datetime = self.updated_at.astimezone(tz.utc).strftime(
-            "%b %-d, %Y %-I:%M%p"
-        )
+    def _get_pull_request_deployment_duration(self):
+        if self.finished_at is not None and self.started_at is not None:
+            duration = (self.finished_at - self.started_at).total_seconds()
+            return format_duration(duration)
+        return "`n/a`"
 
-        preview_url = "`n/a`"
-
-        first_service_url = service.urls.filter(
+    def _get_pull_request_preview_url(self):
+        first_service_url = self.service.urls.filter(
             associated_port__isnull=False, redirect_to__isnull=True
         ).first()
 
         if first_service_url is not None:
-            preview_url = f"[Preview URL](//{first_service_url.domain}{first_service_url.base_path})"
+            return f"[Preview URL](//{first_service_url.domain}{first_service_url.base_path})"
+        return "`n/a`"
 
-        status_emoji_map = {
-            "HEALTHY": "🟢",
-            "FAILED": "❌",
-            "QUEUED": "⏳",
-            "PREPARING": "⏳",
-            "BUILDING": "🔨",
-            "STARTING": "▶️",
-            "RESTARTING": "🔄",
-            "CANCELLING": "⏹️",
-            "CANCELLED": "🚫",
-        }
-
-        return replace_placeholders(
-            PREVIEW_DEPLOYMENT_COMMENT_MARKDOWN_TEMPLATE,
-            replacements=dict(
-                dpl=dict(
-                    service_fqdn=f"{project.slug}/{service.slug}",
-                    service_url=f"//{settings.ZANE_APP_DOMAIN}/project/{project.slug}/{environment.name}/services/{service.slug}",
-                    status=(
-                        "Ready"
-                        if self.status == Deployment.DeploymentStatus.HEALTHY
-                        else self.status.capitalize()
-                    ),
-                    url=f"//{settings.ZANE_APP_DOMAIN}/project/{project.slug}/{environment.name}/services/{service.slug}/deployments/{self.hash}/build-logs",
-                    updated_at=formated_datetime,
-                    preview_url=preview_url,
-                    status_icon=status_emoji_map[self.status],
-                    duration="`n/a`",
-                )
-            ),
-        )
-
-    async def aget_pull_request_deployment_comment_body(self):
+    def _build_pull_request_deployment_comment_row(self):
         service = self.service
-        project = self.service.project
-        environment = self.service.environment
-
+        project = service.project
+        environment = service.environment
         formated_datetime = self.updated_at.astimezone(tz.utc).strftime(
             "%b %-d, %Y %-I:%M%p"
         )
 
-        preview_url = "`n/a`"
-
-        first_service_url = await service.urls.filter(
-            associated_port__isnull=False, redirect_to__isnull=True
-        ).afirst()
-
-        if first_service_url is not None:
-            preview_url = f"[Visit Preview ↗](//{first_service_url.domain}{first_service_url.base_path})"
-
-        status_emoji_map = {
-            "HEALTHY": "🟢",
-            "FAILED": "❌",
-            "QUEUED": "⏳",
-            "PREPARING": "⏳",
-            "BUILDING": "🔨",
-            "STARTING": "▶️",
-            "RESTARTING": "🔄",
-            "CANCELLING": "⏹️",
-            "CANCELLED": "🚫",
-        }
-
-        deployment_duration = "`n/a`"
-
-        if self.finished_at is not None and self.started_at is not None:
-            duration = (self.finished_at - self.started_at).total_seconds()
-            deployment_duration = format_duration(duration)
-
-        return replace_placeholders(
-            PREVIEW_DEPLOYMENT_COMMENT_MARKDOWN_TEMPLATE,
-            replacements=dict(
-                dpl=dict(
-                    service_fqdn=f"{project.slug}/{service.slug}",
-                    service_url=f"//{settings.ZANE_APP_DOMAIN}/project/{project.slug}/{environment.name}/services/{service.slug}",
-                    status=(
-                        "Ready"
-                        if self.status == Deployment.DeploymentStatus.HEALTHY
-                        else self.status.capitalize()
-                    ),
-                    url=f"//{settings.ZANE_APP_DOMAIN}/project/{project.slug}/{environment.name}/services/{service.slug}/deployments/{self.hash}/build-logs",
-                    updated_at=formated_datetime,
-                    preview_url=preview_url,
-                    status_icon=status_emoji_map[self.status],
-                    duration=deployment_duration,
-                )
-            ),
+        status = (
+            "Ready"
+            if self.status == Deployment.DeploymentStatus.HEALTHY
+            else self.status.capitalize()
         )
+        service_fqdn = f"{project.slug}/{service.slug}"
+        service_url = f"//{settings.ZANE_APP_DOMAIN}/project/{project.slug}/{environment.name}/services/{service.slug}"
+        deployment_url = f"//{settings.ZANE_APP_DOMAIN}/project/{project.slug}/{environment.name}/services/{service.slug}/deployments/{self.hash}/build-logs"
+        return (
+            f"| [{service_fqdn}]({service_url})"
+            f" | {self._get_pull_request_status_icon()} [{status}]({deployment_url})"
+            f" | {self._get_pull_request_preview_url()}"
+            f" | {self._get_pull_request_deployment_duration()}"
+            f" | {formated_datetime} |"
+        )
+
+    def get_pull_request_deployment_comment_body(self):
+        environment = self.service.environment
+        preview_meta = environment.preview_metadata
+
+        service_slugs = [self.service.slug]
+        if preview_meta is not None and len(preview_meta.updated_service_slugs) > 0:
+            service_slugs = cast(list[str], preview_meta.updated_service_slugs)
+
+        rows: list[str] = []
+        for slug in service_slugs:
+            latest_deployment = (
+                Deployment.objects.filter(
+                    service__environment=environment,
+                    service__slug=slug,
+                )
+                .select_related("service", "service__project", "service__environment")
+                .prefetch_related("service__urls")
+                .order_by("-queued_at")
+                .first()
+            )
+            if latest_deployment is not None:
+                rows.append(latest_deployment._build_pull_request_deployment_comment_row())
+
+        if len(rows) == 0:
+            rows.append(self._build_pull_request_deployment_comment_row())
+
+        return (
+            "### ZaneOps Preview Deployment\n\n"
+            "| Service                                       | Deployment                                         | Preview                                | Deployment duration       | Updated (UTC)             |\n"
+            "| :-------------------------------------------- | :------------------------------------------------- | :------------------------------------- | :------------------------ | :------------------------ |\n"
+            + "\n".join(rows)
+        )
+
+    async def aget_pull_request_deployment_comment_body(self):
+        return await sync_to_async(self.get_pull_request_deployment_comment_body)()
 
 
 class BaseDeploymentChange(TimestampedModel):
@@ -1957,6 +1950,7 @@ class PreviewEnvMetadata(models.Model):
     auth_enabled = models.BooleanField(default=False)
     auth_user = models.CharField(null=True)
     auth_password = models.CharField(null=True)
+    updated_service_slugs = models.JSONField(default=list, blank=True)
 
     def get_pull_request_deployment_blocked_comment_body(self, service: Service):
         project = service.project
@@ -1993,6 +1987,8 @@ class PreviewEnvMetadata(models.Model):
 class CloneEnvPreviewPayload:
     template: "PreviewEnvTemplate"
     metadata: PreviewEnvMetadata
+    services_to_clone_ids: list[str] | None = None
+    services_to_override_ids: list[str] | None = None
 
 
 class Environment(TimestampedModel):
@@ -2158,7 +2154,29 @@ class Environment(TimestampedModel):
                         .all()
                     )
 
-            if preview_data.metadata.service.id not in [
+            if preview_data.services_to_clone_ids is not None:
+                extra_services = list(
+                    self.services.filter(id__in=preview_data.services_to_clone_ids)
+                    .select_related(
+                        "healthcheck",
+                        "project",
+                        "environment",
+                    )
+                    .prefetch_related(
+                        "volumes",
+                        "ports",
+                        "urls",
+                        "env_variables",
+                        "changes",
+                        "configs",
+                    )
+                    .all()
+                )
+                existing_ids = {service.id for service in services_to_clone}
+                for service in extra_services:
+                    if service.id not in existing_ids:
+                        services_to_clone.append(service)
+            elif preview_data.metadata.service.id not in [
                 service.id for service in services_to_clone
             ]:
                 services_to_clone.append(preview_data.metadata.service)
@@ -2211,17 +2229,23 @@ class Environment(TimestampedModel):
                     case DeploymentChange.ChangeField.PORTS:
                         # Don't copy port changes to not cause conflicts with other ports
                         continue
-                    case DeploymentChange.ChangeField.GIT_SOURCE if (
-                        preview_data is not None
-                        and service == preview_data.metadata.service
-                    ):
-                        # overwrite the `branch_name` and `commit_sha`
-                        source_data = cast(dict, change.new_value)
-                        source_data["repository_url"] = (
-                            preview_data.metadata.head_repository_url
-                        )
-                        source_data["branch_name"] = preview_data.metadata.branch_name
-                        source_data["commit_sha"] = preview_data.metadata.commit_sha
+                    case DeploymentChange.ChangeField.GIT_SOURCE if preview_data is not None:
+                        should_override = False
+                        if preview_data.services_to_override_ids is not None:
+                            should_override = (
+                                service.id in preview_data.services_to_override_ids
+                            )
+                        else:
+                            should_override = service == preview_data.metadata.service
+
+                        if should_override:
+                            # overwrite the `branch_name` and `commit_sha`
+                            source_data = cast(dict, change.new_value)
+                            source_data["repository_url"] = (
+                                preview_data.metadata.head_repository_url
+                            )
+                            source_data["branch_name"] = preview_data.metadata.branch_name
+                            source_data["commit_sha"] = preview_data.metadata.commit_sha
                 change.service = cloned_service
                 change.save()
 

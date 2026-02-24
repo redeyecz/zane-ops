@@ -122,6 +122,18 @@ class ProjectCreateViewTests(AuthAPITestCase):
         self.assertEqual(status.HTTP_201_CREATED, response.status_code)
         self.assertEqual("zane-ops", Project.objects.filter().first().slug)
 
+    def test_generate_project_preview_deploy_token_on_creation(self):
+        self.loginUser()
+        response = self.client.post(
+            reverse("zane_api:projects.list"),
+            data={"slug": "zane-ops"},
+        )
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+        project = Project.objects.get(slug="zane-ops")
+        self.assertTrue(
+            project.preview_deploy_token.startswith(Project.PREVIEW_DEPLOY_TOKEN_PREFIX)
+        )
+
 
 class ProjectUpdateViewTests(AuthAPITestCase):
     def test_sucessfully_update_project_slug(self):

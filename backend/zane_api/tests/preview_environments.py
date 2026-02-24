@@ -506,6 +506,128 @@ class PreviewEnvironmentsViewTests(BasePreviewEnvTests):
         self.assertEqual("feat/test-1", cloned_git_service.branch_name)
 
     @responses.activate
+    def test_trigger_preview_environment_via_project_preview_token_includes_repo_matched_services_even_with_only_template(
+        self,
+    ):
+        gitapp = self.create_and_install_github_app()
+
+        _, redis_service = self.create_and_deploy_redis_docker_service()
+        p, backend_service = self.create_and_deploy_git_service(
+            slug="backend",
+            repository="https://github.com/Fredkiss3/private-ac",
+            git_app_id=gitapp.id,
+        )
+        _, frontend_service = self.create_and_deploy_git_service(
+            slug="frontend",
+            repository="https://github.com/Fredkiss3/private-ac",
+            git_app_id=gitapp.id,
+        )
+
+        template = p.preview_templates.create(
+            slug="only-redis",
+            base_environment=p.production_env,
+            clone_strategy=PreviewEnvTemplate.PreviewCloneStrategy.ONLY,
+        )
+        template.services_to_clone.add(redis_service)
+
+        response = self.client.post(
+            reverse(
+                "zane_api:services.git.trigger_preview_env",
+                kwargs={"deploy_token": p.preview_deploy_token},
+            ),
+            data={
+                "branch_name": "feat/test-1",
+                "template": template.slug,
+                "repository_url": "https://github.com/Fredkiss3/private-ac",
+                "services_env_overrides": {
+                    "backend": [
+                        {
+                            "key": "NEON_DATABASE_URL",
+                            "value": "postgres://preview",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertEqual(status.HTTP_201_CREATED, response.status_code)
+        jprint(response.json())
+
+        preview_env = cast(
+            Environment,
+            p.environments.filter(is_preview=True).select_related("preview_metadata").first(),
+        )
+        self.assertIsNotNone(preview_env)
+        self.assertEqual(3, preview_env.services.count())
+
+        cloned_backend_service = preview_env.services.get(slug=backend_service.slug)
+        cloned_frontend_service = preview_env.services.get(slug=frontend_service.slug)
+        cloned_redis_service = preview_env.services.get(slug=redis_service.slug)
+        self.assertEqual("feat/test-1", cloned_backend_service.branch_name)
+        self.assertEqual("feat/test-1", cloned_frontend_service.branch_name)
+        self.assertIsNotNone(cloned_redis_service)
+        self.assertEqual(
+            "postgres://preview",
+            cloned_backend_service.env_variables.get(key="NEON_DATABASE_URL").value,
+        )
+
+    @responses.activate
+    def test_trigger_preview_environment_via_project_preview_token_rejects_env_overrides_outside_repository_matched_services(
+        self,
+    ):
+        gitapp = self.create_and_install_github_app()
+
+        _, redis_service = self.create_and_deploy_redis_docker_service()
+        p, _ = self.create_and_deploy_git_service(
+            slug="backend",
+            repository="https://github.com/Fredkiss3/private-ac",
+            git_app_id=gitapp.id,
+        )
+
+        response = self.client.post(
+            reverse(
+                "zane_api:services.git.trigger_preview_env",
+                kwargs={"deploy_token": p.preview_deploy_token},
+            ),
+            data={
+                "branch_name": "feat/test-1",
+                "repository_url": "https://github.com/Fredkiss3/private-ac",
+                "services_env_overrides": {
+                    redis_service.slug: [
+                        {"key": "SHOULD_FAIL", "value": "true"},
+                    ]
+                },
+            },
+        )
+        self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
+        self.assertIsNotNone(
+            self.get_error_from_response(response, field="services_env_overrides")
+        )
+
+    @responses.activate
+    def test_trigger_preview_environment_via_project_preview_token_rejects_repository_with_no_matching_services(
+        self,
+    ):
+        gitapp = self.create_and_install_github_app()
+        p, _ = self.create_and_deploy_git_service(
+            slug="backend",
+            repository="https://github.com/Fredkiss3/private-ac",
+            git_app_id=gitapp.id,
+        )
+
+        response = self.client.post(
+            reverse(
+                "zane_api:services.git.trigger_preview_env",
+                kwargs={"deploy_token": p.preview_deploy_token},
+            ),
+            data={
+                "branch_name": "feat/test-1",
+                "repository_url": "https://github.com/Fredkiss3/does-not-exist",
+            },
+        )
+        self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code)
+        self.assertIsNotNone(self.get_error_from_response(response, field="repository_url"))
+
+    @responses.activate
     async def test_trigger_preview_environment_via_deploy_token_deploy_services(self):
         gitapp = await self.acreate_and_install_github_app()
         responses.add_passthru(settings.CADDY_PROXY_ADMIN_HOST)
