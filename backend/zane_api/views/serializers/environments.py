@@ -195,6 +195,46 @@ class TriggerPreviewEnvRequestSerializer(serializers.Serializer):
         return attrs
 
 
+class TriggerProjectPreviewEnvRequestSerializer(serializers.Serializer):
+    branch_name = serializers.CharField(required=False)
+    pr_number = serializers.IntegerField(required=False)
+    commit_sha = serializers.CharField(
+        default=HEAD_COMMIT, validators=[validate_git_commit_sha]
+    )
+    template = serializers.CharField(required=False)
+    repository_url = serializers.URLField(required=True)
+    services_env_overrides = serializers.DictField(
+        required=False,
+        default=dict,
+        child=serializers.ListSerializer(child=EnvRequestSerializer()),
+    )
+
+    def validate_template(self, value: str):
+        project: Project | None = self.context.get("project")
+        if project is None:
+            raise serializers.ValidationError("`project` is required in context.")
+
+        try:
+            project.preview_templates.get(slug=value)
+        except PreviewEnvTemplate.DoesNotExist:
+            raise serializers.ValidationError(
+                f"The preview template `{value}` does not exist in this project"
+            )
+
+        return value
+
+    def validate(self, attrs: dict):
+        if attrs.get("branch_name") is not None and attrs.get("pr_number") is not None:
+            raise serializers.ValidationError(
+                "Only one of `branch_name` or `pr_number` should be provided"
+            )
+        elif attrs.get("branch_name") is None and attrs.get("pr_number") is None:
+            raise serializers.ValidationError(
+                "At least one of `branch_name` or `pr_number` should be provided"
+            )
+        return attrs
+
+
 class PreviewEnvDeployDecision:
     APPROVE = "APPROVE"
     DECLINE = "DECLINE"

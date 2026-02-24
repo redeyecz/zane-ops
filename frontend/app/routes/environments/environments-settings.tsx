@@ -67,6 +67,10 @@ export default function EnvironmentSettingsPage({
     ...environmentQueries.single(params.projectSlug, params.envSlug),
     initialData: loaderData.environment
   });
+  const { data: project } = useQuery(projectQueries.single(params.projectSlug));
+  const projectPreviewDeployToken = (
+    project as { preview_deploy_token?: string } | undefined
+  )?.preview_deploy_token;
 
   const preview_head_repo_path = env.preview_metadata?.head_repository_url
     ? new URL(env.preview_metadata?.head_repository_url).pathname.substring(1)
@@ -85,9 +89,6 @@ export default function EnvironmentSettingsPage({
                 <InfoIcon size={15} className="flex-none text-grey" />
               </div>
               <div className="h-full border border-grey/50"></div>
-              {env.name === "production" && (
-                <div className="bg-grey/50 rounded-md size-2" />
-              )}
             </div>
             <div
               className={cn(
@@ -100,6 +101,33 @@ export default function EnvironmentSettingsPage({
               <EnvironmentNameForm environment={env} />
             </div>
           </section>
+
+          {!env.is_preview && (
+            <section id="preview-trigger" className="flex gap-1 scroll-mt-20">
+              <div className="w-16 hidden md:flex flex-col items-center">
+                <div className="flex rounded-full size-10 flex-none items-center justify-center p-1 border-2 border-grey/50">
+                  <WebhookIcon size={15} className="flex-none text-grey" />
+                </div>
+                {env.name !== "production" ? (
+                  <div className="h-full border border-grey/50"></div>
+                ) : (
+                  <div className="bg-grey/50 rounded-md size-2" />
+                )}
+              </div>
+              <div
+                className={cn(
+                  "w-full flex flex-col gap-5 pt-1",
+                  env.name === "production" ? "pb-6" : "pb-8"
+                )}
+              >
+                <h2 className="text-lg text-grey">Preview trigger</h2>
+
+                <ProjectPreviewTriggerTokenCard
+                  previewDeployToken={projectPreviewDeployToken}
+                />
+              </div>
+            </section>
+          )}
 
           {env.preview_metadata && (
             <section id="metadata" className="flex gap-1 scroll-mt-20">
@@ -517,6 +545,92 @@ export default function EnvironmentSettingsPage({
         </div>
       </div>
     </section>
+  );
+}
+
+function ProjectPreviewTriggerTokenCard({
+  previewDeployToken
+}: {
+  previewDeployToken?: string;
+}) {
+  const previewDeployUrl =
+    typeof window !== "undefined" && previewDeployToken
+      ? `${window.location.protocol}//${window.location.host}/api/trigger-preview/${previewDeployToken}`
+      : "";
+
+  return (
+    <div className="flex flex-col gap-4 items-start max-w-4xl w-full rounded-md border border-border p-4">
+      <fieldset className="w-full flex flex-col gap-2">
+        <legend className="text-lg">Project preview webhook</legend>
+        <p className="text-gray-400">
+          Trigger preview deployments for repository-matched services with this
+          project-scoped token.&nbsp;
+          <a
+            href="https://zaneops.dev/api-reference/openapi/#tag/trigger-preview"
+            target="_blank"
+            className="text-link underline inline-flex gap-1 items-center"
+          >
+            API reference <ExternalLinkIcon size={12} />
+          </a>
+        </p>
+      </fieldset>
+
+      <fieldset className="w-full flex flex-col gap-2">
+        <label className="text-muted-foreground" htmlFor="project_preview_token">
+          Project token
+        </label>
+        <div className="flex flex-col md:flex-row gap-2 items-stretch">
+          <PasswordToggleInput
+            id="project_preview_token"
+            label="project preview token"
+            readOnly
+            value={previewDeployToken ?? ""}
+            className={cn(
+              "disabled:placeholder-shown:font-mono disabled:bg-muted",
+              "disabled:border-transparent disabled:opacity-100"
+            )}
+          />
+          <CopyButton
+            type="button"
+            variant="outline"
+            showLabel
+            className="!opacity-100 h-10"
+            disabled={!previewDeployToken}
+            value={previewDeployToken ?? ""}
+            label={(hasCopied) => (hasCopied ? "Copied" : "Copy token")}
+          />
+        </div>
+      </fieldset>
+
+      <fieldset className="w-full flex flex-col gap-2">
+        <label
+          className="text-muted-foreground"
+          htmlFor="project_preview_webhook_url"
+        >
+          Webhook URL
+        </label>
+        <div className="flex flex-col md:flex-row gap-2 items-stretch">
+          <Input
+            id="project_preview_webhook_url"
+            readOnly
+            value={previewDeployUrl}
+            className={cn(
+              "placeholder-shown:font-mono bg-muted",
+              "disabled:border-transparent disabled:opacity-100"
+            )}
+          />
+          <CopyButton
+            type="button"
+            variant="outline"
+            showLabel
+            className="!opacity-100 h-10"
+            disabled={!previewDeployUrl}
+            value={previewDeployUrl}
+            label={(hasCopied) => (hasCopied ? "Copied" : "Copy URL")}
+          />
+        </div>
+      </fieldset>
+    </div>
   );
 }
 

@@ -553,6 +553,7 @@ class GitlabWebhookAPIView(APIView):
                                 ),
                                 pr_number=merge_request["iid"],
                                 pr_title=merge_request["title"],
+                                updated_service_slugs=[current_service.slug],
                             )
 
                             base_environment = cast(

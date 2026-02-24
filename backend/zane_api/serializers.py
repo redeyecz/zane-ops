@@ -566,6 +566,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     total_stack_services = serializers.IntegerField(read_only=True)
     healthy_stack_services = serializers.IntegerField(read_only=True)
     environments = SimpleEnvironmentSerializer(many=True, read_only=True)
+    preview_deploy_token = serializers.CharField(read_only=True)
 
     class Meta:
         model = models.Project
@@ -580,4 +581,5 @@ class ProjectSerializer(serializers.ModelSerializer):
             "total_services",
             "total_stack_services",
             "healthy_stack_services",
+            "preview_deploy_token",
         ]

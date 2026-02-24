@@ -15,6 +15,7 @@ from .serializers import (
     CreateEnvironmentRequestSerializer,
     CloneEnvironmentRequestSerializer,
     TriggerPreviewEnvRequestSerializer,
+    TriggerProjectPreviewEnvRequestSerializer,
     UpdateEnvironmentRequestSerializer,
     PreviewEnvTemplateSerializer,
     ReviewPreviewEnvDeploymentRequestSerializer,
@@ -607,6 +608,9 @@ class TriggerPreviewEnvironmentAPIView(APIView):
         summary="Webhook to trigger a new preview environment",
     )
     def post(self, request: Request, deploy_token: str):
+        if deploy_token.startswith(Project.PREVIEW_DEPLOY_TOKEN_PREFIX):
+            return self._post_with_project_token(request=request, deploy_token=deploy_token)
+
         try:
             current_service = (
                 Service.objects.filter(
@@ -722,6 +726,7 @@ class TriggerPreviewEnvironmentAPIView(APIView):
                 auth_user=preview_template.auth_user,
                 auth_password=preview_template.auth_password,
                 deploy_state=PreviewEnvMetadata.PreviewDeployState.APPROVED,
+                updated_service_slugs=[current_service.slug],
             )
 
             new_environment = base_environment.clone(
@@ -783,6 +788,7 @@ class TriggerPreviewEnvironmentAPIView(APIView):
                     ),
                     pr_number=pull_request["number"],
                     pr_title=pull_request["title"],
+                    updated_service_slugs=[current_service.slug],
                 )
 
                 base_environment = cast(Environment, preview_template.base_environment)
@@ -927,6 +933,402 @@ class TriggerPreviewEnvironmentAPIView(APIView):
 
         transaction.on_commit(on_commit)
 
+        serializer = EnvironmentWithVariablesSerializer(new_environment)
+        return Response(data=serializer.data, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _normalize_repository_url(repository_url: str):
+        return repository_url.removesuffix(".git").rstrip("/").lower()
+
+    def _post_with_project_token(self, request: Request, deploy_token: str):
+        try:
+            project = Project.objects.get(preview_deploy_token=deploy_token)
+        except Project.DoesNotExist:
+            raise exceptions.NotFound(
+                detail=f"A project with a preview deploy token `{deploy_token}` does not exist in this ZaneOps instance."
+            )
+
+        form = TriggerProjectPreviewEnvRequestSerializer(
+            data=request.data, context={"project": project}
+        )
+        form.is_valid(raise_exception=True)
+        data = cast(ReturnDict, form.data)
+
+        preview_branch_name = data.get("branch_name")
+        preview_pr_number = data.get("pr_number")
+        template_slug = data.get("template")
+
+        if template_slug is not None:
+            preview_template = (
+                project.preview_templates.filter(slug=template_slug)
+                .select_related("base_environment")
+                .get()
+            )
+        else:
+            preview_template = project.default_preview_template
+
+        total_preview_env_for_template = project.environments.filter(
+            is_preview=True,
+            preview_metadata__template=preview_template,
+        ).count()
+
+        if total_preview_env_for_template == preview_template.preview_env_limit:
+            raise exceptions.PermissionDenied(
+                "You are not allowed to create a new preview environment because the limit"
+                f"of {preview_template.preview_env_limit} preview envs for this preview template has been reached"
+            )
+
+        base_environment = preview_template.base_environment or project.production_env
+        repository_url = cast(str, data["repository_url"])
+        normalized_repository_url = self._normalize_repository_url(repository_url)
+
+        candidate_services = list(
+            base_environment.services.filter(
+                type=Service.ServiceType.GIT_REPOSITORY,
+                git_app__isnull=False,
+            )
+            .select_related(
+                "project",
+                "healthcheck",
+                "environment",
+                "git_app",
+                "git_app__gitlab",
+                "git_app__github",
+            )
+            .prefetch_related(
+                "volumes", "ports", "urls", "env_variables", "changes"
+            )
+        )
+
+        matched_services = [
+            service
+            for service in candidate_services
+            if service.repository_url is not None
+            and self._normalize_repository_url(service.repository_url)
+            == normalized_repository_url
+        ]
+        if len(matched_services) == 0:
+            raise serializers.ValidationError(
+                {
+                    "repository_url": [
+                        (
+                            "No service in the selected template base environment matches "
+                            f"`{repository_url}`."
+                        )
+                    ]
+                }
+            )
+
+        git_app_ids = {
+            service.git_app_id
+            for service in matched_services
+            if service.git_app_id is not None
+        }
+        if len(git_app_ids) != 1:
+            raise serializers.ValidationError(
+                {
+                    "repository_url": [
+                        (
+                            "All matched services need to use the same Git app in order "
+                            "to resolve pull requests and branches consistently."
+                        )
+                    ]
+                }
+            )
+
+        matched_service_slugs = {service.slug for service in matched_services}
+        matched_service_ids = [service.id for service in matched_services]
+        project_service_slugs = set(project.services.values_list("slug", flat=True))
+        base_service_slugs = set(base_environment.services.values_list("slug", flat=True))
+
+        services_env_overrides = cast(
+            dict[str, list[dict[str, str]]], data["services_env_overrides"]
+        )
+        override_validation_errors: list[str] = []
+        for service_slug in services_env_overrides.keys():
+            if service_slug not in project_service_slugs:
+                override_validation_errors.append(
+                    f"Service `{service_slug}` does not exist in this project."
+                )
+            elif service_slug not in base_service_slugs:
+                override_validation_errors.append(
+                    f"Service `{service_slug}` does not exist in the template base environment."
+                )
+            elif service_slug not in matched_service_slugs:
+                override_validation_errors.append(
+                    f"Service `{service_slug}` is not part of the repository-matched service set for this request."
+                )
+
+        if len(override_validation_errors) > 0:
+            raise serializers.ValidationError(
+                {"services_env_overrides": override_validation_errors}
+            )
+
+        for matched_service in matched_services:
+            git_source_change = matched_service.unapplied_changes.filter(
+                field=DeploymentChange.ChangeField.GIT_SOURCE
+            ).first()
+            if (
+                git_source_change is not None
+                and cast(dict, git_source_change.new_value).get("git_app") is None
+            ):
+                raise ResourceConflict(
+                    detail=(
+                        f"The service `{matched_service.slug}` has a pending change which would remove the "
+                        "Git app attached to it. Please cancel this change before triggering the preview."
+                    )
+                )
+
+        anchor_service = matched_services[0]
+        gitapp = cast(GitApp, anchor_service.git_app)
+        fake = Faker()
+        Faker.seed(time.monotonic())
+
+        should_deploy = True
+        sorted_matched_service_slugs = sorted(matched_service_slugs)
+
+        if preview_branch_name is not None:
+            # Reuse branch validation from the existing service-scoped serializer.
+            TriggerPreviewEnvRequestSerializer(
+                data={
+                    "branch_name": preview_branch_name,
+                    "commit_sha": data["commit_sha"],
+                },
+                context={"project": project, "service": anchor_service},
+            ).is_valid(raise_exception=True)
+
+            env_name = (
+                f"preview-{slugify(preview_branch_name)}-{project.slug}-{fake.slug()}"
+            ).lower()
+            external_branch_url = None
+            if gitapp.github:
+                external_branch_url = (
+                    cast(str, anchor_service.repository_url).removesuffix(".git")
+                    + "/tree/"
+                    + preview_branch_name
+                )
+            elif gitapp.gitlab:
+                external_branch_url = (
+                    cast(str, anchor_service.repository_url).removesuffix(".git")
+                    + "/-/tree/"
+                    + preview_branch_name
+                )
+
+            preview_commit_sha = data["commit_sha"]
+            preview_metadata = PreviewEnvMetadata.objects.create(
+                branch_name=preview_branch_name,
+                commit_sha=preview_commit_sha,
+                source_trigger=Environment.PreviewSourceTrigger.API,
+                service=anchor_service,
+                template=preview_template,
+                auto_teardown=preview_template.auto_teardown,
+                external_url=external_branch_url,
+                git_app=gitapp,
+                head_repository_url=cast(str, anchor_service.repository_url),
+                ttl_seconds=preview_template.ttl_seconds,
+                auth_enabled=preview_template.auth_enabled,
+                auth_user=preview_template.auth_user,
+                auth_password=preview_template.auth_password,
+                deploy_state=PreviewEnvMetadata.PreviewDeployState.APPROVED,
+                updated_service_slugs=sorted_matched_service_slugs,
+            )
+            new_environment = base_environment.clone(
+                env_name=env_name,
+                preview_data=CloneEnvPreviewPayload(
+                    template=preview_template,
+                    metadata=preview_metadata,
+                    services_to_clone_ids=matched_service_ids,
+                    services_to_override_ids=matched_service_ids,
+                ),
+            )
+        elif preview_pr_number is not None:
+            if gitapp.github:
+                github = gitapp.github
+                repo_full_path = normalized_repository_url.removeprefix(
+                    "https://github.com/"
+                )
+                url = f"https://api.github.com/repos/{repo_full_path}/pulls/{preview_pr_number}"
+                headers = {
+                    "Authorization": f"Bearer {github.get_access_token()}",
+                    "Accept": "application/vnd.github+json",
+                }
+                response = requests.get(url, headers=headers)
+                if response.status_code != status.HTTP_200_OK:
+                    raise BadRequest(
+                        f"Pull Request with number `{preview_pr_number}` does not exists does not exists on repo `{repository_url}`"
+                    )
+                pull_request = response.json()
+
+                branch_name = pull_request["head"]["ref"]
+                is_fork = pull_request["head"]["repo"]["fork"]
+                should_deploy = not is_fork
+
+                base_repository_url = f"https://github.com/{pull_request['base']['repo']['full_name']}.git"
+                head_repository_url = f"https://github.com/{pull_request['head']['repo']['full_name']}.git"
+
+                env_name = f"preview-pr-{pull_request['number']}-{project.slug}-{fake.slug()}".lower()
+                preview_meta = PreviewEnvMetadata.objects.create(
+                    branch_name=branch_name,
+                    source_trigger=Environment.PreviewSourceTrigger.PULL_REQUEST,
+                    service=anchor_service,
+                    template=preview_template,
+                    auto_teardown=preview_template.auto_teardown,
+                    external_url=pull_request["html_url"],
+                    git_app=gitapp,
+                    head_repository_url=head_repository_url,
+                    ttl_seconds=preview_template.ttl_seconds,
+                    auth_enabled=preview_template.auth_enabled,
+                    auth_user=preview_template.auth_user,
+                    pr_author=pull_request["user"]["login"],
+                    pr_base_repo_url=base_repository_url,
+                    pr_base_branch_name=pull_request["base"]["ref"],
+                    auth_password=preview_template.auth_password,
+                    deploy_state=(
+                        PreviewEnvMetadata.PreviewDeployState.PENDING
+                        if is_fork
+                        else PreviewEnvMetadata.PreviewDeployState.APPROVED
+                    ),
+                    pr_number=pull_request["number"],
+                    pr_title=pull_request["title"],
+                    updated_service_slugs=sorted_matched_service_slugs,
+                )
+
+                new_environment = base_environment.clone(
+                    env_name=env_name,
+                    preview_data=CloneEnvPreviewPayload(
+                        template=preview_template,
+                        metadata=preview_meta,
+                        services_to_clone_ids=matched_service_ids,
+                        services_to_override_ids=matched_service_ids,
+                    ),
+                )
+                if is_fork:
+                    cloned_service = new_environment.services.get(slug=anchor_service.slug)
+                    owner, repo = cast(str, preview_meta.pr_base_repo_url).removesuffix(
+                        ".git"
+                    ).removeprefix("https://github.com/").split("/")
+                    issue_number = pull_request["number"]
+                    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
+                    headers = {
+                        "Authorization": f"Bearer {github.get_access_token()}",
+                        "Accept": "application/vnd.github+json",
+                    }
+                    payload = {
+                        "body": preview_meta.get_pull_request_deployment_blocked_comment_body(
+                            cloned_service
+                        )
+                    }
+                    response = requests.post(url, headers=headers, json=payload)
+                    if response.status_code == status.HTTP_201_CREATED:
+                        result = response.json()
+                        preview_meta.pr_comment_id = result["id"]
+                        preview_meta.save()
+                    else:
+                        print(
+                            f"Error when trying to create a PR comment for the {preview_meta.service=} on the PR #{pull_request['number']}({pull_request['html_url']}): ",
+                            response.status_code,
+                            response.text,
+                        )
+            else:
+                raise NotImplementedError(
+                    "Specifying the Pull Request number is only supported for github apps right now"
+                )
+        else:
+            raise NotImplementedError("This code should be unreacheable")
+
+        if len(services_env_overrides) > 0:
+            cloned_services = {
+                service.slug: service
+                for service in new_environment.services.filter(
+                    slug__in=services_env_overrides.keys()
+                )
+            }
+            for service_slug, overrides in services_env_overrides.items():
+                cloned_service = cloned_services.get(service_slug)
+                if cloned_service is None:
+                    continue
+                for env_var in overrides:
+                    cloned_service.env_variables.update_or_create(
+                        key=env_var["key"],
+                        defaults={"value": env_var["value"]},
+                    )
+
+        workflows_to_run: List[StartWorkflowArg] = []
+        if should_deploy:
+            workflows_to_run = [
+                StartWorkflowArg(
+                    CreateEnvNetworkWorkflow.run,
+                    EnvironmentDetails(
+                        id=new_environment.id,
+                        project_id=project.id,
+                        name=new_environment.name,
+                    ),
+                    new_environment.workflow_id,
+                )
+            ]
+
+            for stack in new_environment.compose_stacks.all():
+                deployment = stack.deployments.create(
+                    commit_message="Deploy from clone",
+                )
+                stack.apply_pending_changes(deployment)
+                deployment.stack_snapshot = stack.snapshot.to_dict()  # type: ignore
+                deployment.save()
+
+                payload = ComposeStackDeploymentDetails.from_deployment(deployment)
+                workflows_to_run.append(
+                    StartWorkflowArg(
+                        DeployComposeStackWorkflow.run,
+                        payload,
+                        payload.workflow_id,
+                    )
+                )
+
+            for service in new_environment.services.all():
+                if service.type == Service.ServiceType.DOCKER_REGISTRY:
+                    workflow = DeployDockerServiceWorkflow.run
+                    new_deployment = service.prepare_new_docker_deployment(
+                        trigger_method=Deployment.DeploymentTriggerMethod.API
+                    )
+                else:
+                    workflow = DeployGitServiceWorkflow.run
+                    new_deployment = service.prepare_new_git_deployment(
+                        trigger_method=Deployment.DeploymentTriggerMethod.API
+                    )
+
+                payload = DeploymentDetails.from_deployment(deployment=new_deployment)
+                workflows_to_run.append(
+                    StartWorkflowArg(
+                        workflow,
+                        payload,
+                        payload.workflow_id,
+                    )
+                )
+
+            if preview_template.ttl_seconds is not None:
+                workflows_to_run.append(
+                    StartWorkflowArg(
+                        workflow=DelayedArchiveEnvWorkflow.run,
+                        payload=EnvironmentDetails(
+                            id=new_environment.id,
+                            project_id=new_environment.project.id,
+                            name=new_environment.name,
+                        ),
+                        workflow_id=new_environment.delayed_archive_workflow_id,
+                        start_delay=timedelta(seconds=preview_template.ttl_seconds),
+                    )
+                )
+
+        def on_commit():
+            for wf in workflows_to_run:
+                TemporalClient.start_workflow(
+                    workflow=wf.workflow,
+                    arg=wf.payload,
+                    id=wf.workflow_id,
+                    start_delay=wf.start_delay,
+                )
+
+        transaction.on_commit(on_commit)
         serializer = EnvironmentWithVariablesSerializer(new_environment)
         return Response(data=serializer.data, status=status.HTTP_201_CREATED)
 

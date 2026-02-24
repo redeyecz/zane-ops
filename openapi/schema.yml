@@ -10991,13 +10991,19 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TriggerPreviewEnvRequestRequest'
+              oneOf:
+              - $ref: '#/components/schemas/TriggerPreviewEnvRequestRequest'
+              - $ref: '#/components/schemas/TriggerProjectPreviewEnvRequestRequest'
           application/x-www-form-urlencoded:
             schema:
-              $ref: '#/components/schemas/TriggerPreviewEnvRequestRequest'
+              oneOf:
+              - $ref: '#/components/schemas/TriggerPreviewEnvRequestRequest'
+              - $ref: '#/components/schemas/TriggerProjectPreviewEnvRequestRequest'
           multipart/form-data:
             schema:
-              $ref: '#/components/schemas/TriggerPreviewEnvRequestRequest'
+              oneOf:
+              - $ref: '#/components/schemas/TriggerPreviewEnvRequestRequest'
+              - $ref: '#/components/schemas/TriggerProjectPreviewEnvRequestRequest'
       security:
       - cookieAuth: []
       - {}
@@ -18722,6 +18728,9 @@ components:
         healthy_stack_services:
           type: integer
           readOnly: true
+        preview_deploy_token:
+          type: string
+          readOnly: true
       required:
       - created_at
       - description
@@ -18729,6 +18738,7 @@ components:
       - healthy_services
       - healthy_stack_services
       - id
+      - preview_deploy_token
       - slug
       - total_services
       - total_stack_services
@@ -25368,6 +25378,34 @@ components:
           items:
             $ref: '#/components/schemas/EnvRequestRequest'
           default: []
+    TriggerProjectPreviewEnvRequestRequest:
+      type: object
+      properties:
+        branch_name:
+          type: string
+          minLength: 1
+        pr_number:
+          type: integer
+        commit_sha:
+          type: string
+          minLength: 1
+          default: HEAD
+        template:
+          type: string
+          minLength: 1
+        repository_url:
+          type: string
+          format: uri
+          minLength: 1
+        services_env_overrides:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/EnvRequestRequest'
+          default: {}
+      required:
+      - repository_url
     TriggerUpdateCreateDesiredVersionErrorComponent:
       type: object
       properties:

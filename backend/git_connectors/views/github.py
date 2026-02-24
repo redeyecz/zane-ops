@@ -522,6 +522,7 @@ class GithubWebhookAPIView(APIView):
                                 ),
                                 pr_number=pull_request["number"],
                                 pr_title=pull_request["title"],
+                                updated_service_slugs=[current_service.slug],
                             )
 
                             base_environment = cast(

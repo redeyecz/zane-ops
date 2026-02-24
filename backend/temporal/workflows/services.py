@@ -1144,13 +1144,16 @@ class DeployGitServiceWorkflow(BaseDeploymentWorklow):
             and environment.preview_metadata is not None
             and environment.preview_metadata.source_trigger
             == PreviewEnvMetadata.PreviewSourceTrigger.PULL_REQUEST
-            # we check that the service that triggered the preview env is the current one
-            # by comparing their network aliases because this value is the same
-            # when we copy the services, but in contrast to the slug, this is not
-            # modifiable by the user
-            and environment.preview_metadata.service.network_alias
-            == deployment.service.network_alias
         )
+
+        if (
+            is_pull_request_preview_deployment
+            and environment.preview_metadata is not None
+            and len(environment.preview_metadata.updated_service_slugs) > 0
+            and deployment.service.slug
+            not in environment.preview_metadata.updated_service_slugs
+        ):
+            return None
 
         if is_pull_request_preview_deployment and git_app is not None:
             if git_app.github is not None:
