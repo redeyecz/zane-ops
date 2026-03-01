@@ -381,28 +381,29 @@ def register_zaneops_app_on_proxy(
         cloudflare_api_token is not None and len(cloudflare_api_token.strip()) > 0
     )
 
+    tls_policy: dict = {"on_demand": True}
+
     if internal_tls:
-        tls_policy = {"on_demand": True, "issuers": [{"module": "internal"}]}
+        tls_policy.update({"issuers": [{"module": "internal"}]})
     elif has_cloudflare_token:
-        tls_policy = {
-            "on_demand": True,
-            "issuers": [
-                {
-                    "module": "acme",
-                    "challenges": {
-                        "dns": {
-                            "provider": {
-                                "name": "cloudflare",
-                                "api_token": "{env.CLOUDFLARE_API_TOKEN}",
+        tls_policy.update(
+            {
+                "issuers": [
+                    {
+                        "module": "acme",
+                        "challenges": {
+                            "dns": {
+                                "provider": {
+                                    "name": "cloudflare",
+                                    "api_token": "{env.CLOUDFLARE_API_TOKEN}",
+                                }
                             }
-                        }
+                        },
                     },
-                },
-                {"module": "acme"},
-            ],
-        }
-    else:
-        tls_policy = {"on_demand": True}
+                    {"module": "acme"},
+                ],
+            }
+        )
 
     tls_app_config = {
         "automation": {
