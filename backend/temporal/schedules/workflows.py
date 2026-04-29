@@ -220,12 +220,12 @@ class CleanupAppLogsWorkflow:
         )
         service_metrics_deleted_count = await workflow.execute_activity_method(
             CleanupActivities.cleanup_service_metrics,
-            start_to_close_timeout=timedelta(seconds=5),
+            start_to_close_timeout=timedelta(minutes=60),
             retry_policy=retry_policy,
         )
         stack_metrics_deleted_count = await workflow.execute_activity_method(
             CleanupActivities.cleanup_compose_stack_metrics,
-            start_to_close_timeout=timedelta(seconds=5),
+            start_to_close_timeout=timedelta(minutes=60),
             retry_policy=retry_policy,
         )
 
